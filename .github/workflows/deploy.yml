@@ -1,0 +1,81 @@
+name: Deploy Telegram Bot
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      APP_DIR: /home/telegramyordamchi
+      SERVICE_NAME: telegram-bot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_KEY }}
+
+      - name: Sync files to server
+        run: |
+          rsync -az --delete \
+            --exclude '.git' \
+            --exclude '.env' \
+            --exclude 'bot.db' \
+            --exclude '__pycache__' \
+            telegram_bot/ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ env.APP_DIR }}/
+
+      - name: Install deps and restart service
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          TIMEZONE: ${{ secrets.TIMEZONE }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${SSH_USER}@${SSH_HOST} "BOT_TOKEN='${BOT_TOKEN}' TIMEZONE='${TIMEZONE:-Asia/Tashkent}' bash -s" <<'EOF'
+          set -e
+          APP_DIR="/home/telegramyordamchi"
+          SERVICE_NAME="telegram-bot"
+
+          mkdir -p "$APP_DIR"
+          cd "$APP_DIR"
+
+          if ! command -v python3 >/dev/null; then
+            apt-get update -y
+            apt-get install -y python3 python3-venv python3-pip
+          fi
+
+          python3 -m venv venv
+          ./venv/bin/pip install --upgrade pip
+          ./venv/bin/pip install -r requirements.txt
+
+          cat > .env <<ENV
+BOT_TOKEN=$BOT_TOKEN
+DATABASE_URL=sqlite+aiosqlite:///./bot.db
+TIMEZONE=$TIMEZONE
+ENV
+
+          cat > /etc/systemd/system/${SERVICE_NAME}.service <<'UNIT'
+[Unit]
+Description=Telegram Baholash Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/telegramyordamchi
+EnvironmentFile=/home/telegramyordamchi/.env
+ExecStart=/home/telegramyordamchi/venv/bin/python -m app.bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+          systemctl daemon-reload
+          systemctl enable ${SERVICE_NAME}
+          systemctl restart ${SERVICE_NAME}
+          EOF
